@@ -13,7 +13,7 @@ from datetime import datetime
 warnings.filterwarnings("ignore")
 
 
-tfrecords_path = '/home/rjackson/tfrecords/2006/*'
+tfrecords_path = '/home/rjackson/tfrecords/2006/2frames_future/*'
 num_frames_in_past = 4
 my_shape = (201, 201)
 is_training = True

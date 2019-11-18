@@ -1,20 +1,25 @@
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model, Model
 from tensorflow.keras.layers import Dense, Activation, Embedding, Flatten, Dropout, TimeDistributed, Reshape, Lambda
-from tensorflow.keras.layers import LSTM, ConvLSTM2D, Conv2D, ZeroPadding2D, BatchNormalization, Input, MaxPooling3D, Dense
+from tensorflow.keras.layers import LSTM, ConvLSTM2D, Conv2D, ZeroPadding2D, BatchNormalization
 from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.optimizers import SGD
+from tensorflow.contrib.data.python.ops import sliding
+
 import pyart
 import numpy as np
 import xarray as xr
 from glob import glob
 import matplotlib.pyplot as plt
 import warnings
+import sys
 from datetime import datetime
 warnings.filterwarnings("ignore")
 
 
 tfrecords_path = '/home/rjackson/tfrecords/2006/*'
-num_frames_in_past = 4
+num_frames_in_past = 3
+num_frames_in_future = int(sys.argv[1])
 my_shape = (201, 201)
 is_training = True
 shuffle = False
@@ -24,45 +29,42 @@ def input_fn():
         feature={'width': tf.FixedLenFeature([], tf.int64, default_value=0),
                  'height': tf.FixedLenFeature([], tf.int64, default_value=0),
                  'image_raw': tf.FixedLenFeature([], tf.string, default_value=""),
-                 'label': tf.FixedLenFeature([], tf.string, default_value=""),
-                 'num_frames_in_past': tf.FixedLenFeature([], tf.int64, default_value=0),
-                 'num_frames_in_future': tf.FixedLenFeature([], tf.int64, default_value=0),
-                 'dt_past': tf.FixedLenFeature([], tf.string, default_value=""),
-                 'dt_future': tf.FixedLenFeature([], tf.float32, default_value=0.),
-                 }
+                 'time': tf.FixedLenFeature([], tf.float32, default_value=0.),
+                }
         features = tf.io.parse_single_example(record, feature)
-        image_shape = (num_frames_in_past, my_shape[0], my_shape[1], 1) 
+        image_shape = (my_shape[0], my_shape[1], 1)
         features['image_raw'] = tf.decode_raw(features['image_raw'], tf.float32)
-        features['image_raw'] = tf.reshape(features['image_raw'], shape=list(image_shape))
-        features['label'] = tf.decode_raw(features['label'], tf.float32)
-        features['label'] = tf.reshape(features['label'], shape=[image_shape[1], image_shape[2], 1])      
-        return {'conv_lst_m2d_input':features['image_raw']}, {'conv2d':features['label']}
+        features['image_raw'] = tf.reshape(features['image_raw'], shape=image_shape)
+        return {'image_raw': features['image_raw']}
 
-    filelist = tf.data.Dataset.list_files(
-       tfrecords_path,
-       seed=3,
-       shuffle=False)
+    def make_inputs(record):
+        return {'conv_lst_m2d_input': record}
 
-    dataset = filelist.apply(
-              tf.data.experimental.parallel_interleave(
-              tf.data.TFRecordDataset,
-              cycle_length=4,
-              sloppy=True))
+    def make_labels(record):
+        return {'conv2d': record}
 
-    #if is_training:
-    #    if shuffle:
-    #        dataset = dataset.apply(tf.data.experimental.shuffle_and_repeat(
-    #                  buffer_size=shuffle_buffer, seed=seed))
-    #    else:
-    #        dataset = dataset.repeat()
+    file_list = sorted(glob(tfrecords_path))
+
+    dataset = tf.data.TFRecordDataset(file_list)
+
+    if is_training:
+        if shuffle:
+            dataset = dataset.apply(tf.data.experimental.shuffle_and_repeat(
+                      buffer_size=shuffle_buffer, seed=seed))
+        else:
+            dataset = dataset.repeat()
 
     dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.apply(
-            tf.data.experimental.map_and_batch(
-                parse_record,
-                batch_size=16,
-                num_parallel_batches=2,
-                drop_remainder=True))
+    dataset = dataset.map(parse_record)
+    features = dataset.window(size=num_frames_in_past, shift=1)
+    features = features.flat_map(lambda x: x["image_raw"].batch(num_frames_in_past)) 
+    features = features.map(make_inputs)
+    features = features.batch(30)
+    labels = dataset.skip(num_frames_in_future)
+    labels = labels.map(lambda x: x["image_raw"])
+    labels = labels.map(make_labels)
+    labels = labels.batch(30)
+    dataset = tf.data.Dataset.zip((features, labels))
     return dataset
 
 def _int64_feature(value):
@@ -99,11 +101,11 @@ def _float_feature(value):
 if __name__ == "__main__":
     hidden_size = 5
     use_dropout=True
-    num_steps = 3
+   
     the_shape = my_shape
     
     def model_function(num_channels=1):
-        new_shape = (num_steps, the_shape[0], the_shape[1], num_channels)
+        new_shape = (None, the_shape[0], the_shape[1], num_channels)
        
         #new_shape_conv10 = (num_steps, the_shape[0]-conv_window, the_shape[1]-conv_window, 1)
         kern_size = (5, 5)
@@ -117,7 +119,7 @@ if __name__ == "__main__":
                              input_shape=new_shape))
                
                              
-        #model.add(BatchNormalization())
+        model.add(BatchNormalization())
 #        max_pool1 = MaxPooling3D(pool_size=(1, 2, 2))(batch_norm1)
         
         model.add(ConvLSTM2D(filters=num_channels, kernel_size=kern_size,
@@ -127,7 +129,7 @@ if __name__ == "__main__":
                              return_sequences=True,
                              ))
                
-        #model.add(BatchNormalization())
+        model.add(BatchNormalization())
 		#max_pool2 = MaxPooling3D(pool_size=(1, 2, 2))(batch_norm2)
 
         model.add(ConvLSTM2D(filters=num_channels, kernel_size=kern_size,
@@ -135,15 +137,15 @@ if __name__ == "__main__":
                              recurrent_activation='hard_sigmoid',
                              activation='tanh', padding='same',
                              return_sequences=False))        
-        #model.add(BatchNormalization())
-        model.add(Dropout(0.3))
+        model.add(BatchNormalization())
+        #model.add(Dropout(0.3))
         #model.add(ConvLSTM2D(filters=num_channels, kernel_size=kern_size,
         #                     data_format='channels_last',
         #                     recurrent_activation='hard_sigmoid',
         #                     activation='tanh', padding='same',
         #                     return_sequences=False))
        
-        #model.add(BatchNormalization())
+        model.add(BatchNormalization())
 
         
         model.add(Conv2D(filters=1, kernel_size=(1, 1), padding='same',
@@ -160,7 +162,6 @@ if __name__ == "__main__":
         my_model = model_function()
         my_model.summary()
         dataset = input_fn()
-        checkpointer = ModelCheckpoint(filepath='/home/rjackson/DNNmodel/model-{epoch:03d}.hdf5', verbose=1)
-        my_model.fit(dataset, None, epochs=200, callbacks=[checkpointer])
-        
-        
+        checkpointer = ModelCheckpoint(filepath=('/home/rjackson/DNNmodel/model-%dframes-{epoch:03d}.hdf5'
+                                                 % num_frames_in_future), verbose=1)
+        my_model.fit(dataset, None, epochs=300, callbacks=[checkpointer], steps_per_epoch=1600)

@@ -16,6 +16,7 @@ warnings.filterwarnings("ignore")
 
 tfrecords_path = '/home/rjackson/tfrecords/2006/*'
 num_frames_in_past = 3
+num_frames_in_future = 1
 my_shape = (201, 201)
 is_training = True
 shuffle = False
@@ -25,37 +26,28 @@ def input_fn():
         feature={'width': tf.FixedLenFeature([], tf.int64, default_value=0),
                  'height': tf.FixedLenFeature([], tf.int64, default_value=0),
                  'image_raw': tf.FixedLenFeature([], tf.string, default_value=""),
-                 'label': tf.FixedLenFeature([], tf.string, default_value=""),
                  'num_frames_in_past': tf.FixedLenFeature([], tf.int64, default_value=0),
                  'num_frames_in_future': tf.FixedLenFeature([], tf.int64, default_value=0),
                  'dt_past': tf.FixedLenFeature([], tf.string, default_value=""),
+                 'time': tf.FixedLenFeature([], tf.string, default_value=""),
                  'dt_future': tf.FixedLenFeature([], tf.float32, default_value=0.),
                  }
         features = tf.io.parse_single_example(record, feature)
         image_shape = (num_frames_in_past, my_shape[0], my_shape[1], 1) 
         features['image_raw'] = tf.decode_raw(features['image_raw'], tf.float32)
         features['image_raw'] = tf.reshape(features['image_raw'], shape=list(image_shape))
-        features['label'] = tf.decode_raw(features['label'], tf.float32)
-        features['label'] = tf.reshape(features['label'], shape=[image_shape[1], image_shape[2], 1])      
-        return {'conv_lst_m2d_input':features['image_raw']}, {'conv2d':features['label']}
+             
+        return {'image_raw': features['image_raw']}
 
-    filelist = tf.data.Dataset.list_files(
-       tfrecords_path,
-       seed=3,
-       shuffle=False)
+    def 
+    dataset = tf.data.TFRecordDataset(file_list)
 
-    dataset = filelist.apply(
-              tf.data.experimental.parallel_interleave(
-              tf.data.TFRecordDataset,
-              cycle_length=4,
-              sloppy=True))
-
-    #if is_training:
-    #    if shuffle:
-    #        dataset = dataset.apply(tf.data.experimental.shuffle_and_repeat(
-    #                  buffer_size=shuffle_buffer, seed=seed))
-    #    else:
-    #        dataset = dataset.repeat()
+    if is_training:
+        if shuffle:
+            dataset = dataset.apply(tf.data.experimental.shuffle_and_repeat(
+                      buffer_size=shuffle_buffer, seed=seed))
+        else:
+            dataset = dataset.repeat()
 
     dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
     dataset = dataset.apply(
@@ -64,6 +56,7 @@ def input_fn():
                 batch_size=30,
                 num_parallel_batches=4,
                 drop_remainder=True))
+    
     return dataset
 
 def _int64_feature(value):
